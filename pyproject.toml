@@ -1,0 +1,29 @@
+[project]
+name = "coke-sequence-control"
+version = "1.0.0"
+description = "sequence and interlock utility"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools]
+packages = [
+    "coke",
+    "coke.ns",
+    "coke.store",
+    "coke.audit",
+    "coke.pusher",
+    "coke.guide",
+    "coke.charger",
+    "coke.quench",
+    "coke.gas",
+    "coke.door",
+    "coke.heating",
+    "coke.dust",
+    "coke.sequence",
+    "coke.console",
+]

@@ -1,0 +1,52 @@
+{
+  "platform": {
+    "name": "sequence-control",
+    "storage_root": "var/state"
+  },
+  "limits": {
+    "pusher": {
+      "stroke_baseline_mm": 3200.0,
+      "stroke_tolerance_mm": 25.0,
+      "max_stroke_mm": 3350.0,
+      "speed_min_mm_s": 12.0,
+      "speed_max_mm_s": 38.0,
+      "speed_default_mm_s": 24.0
+    },
+    "guide": {
+      "align_tolerance_mm": 15.0,
+      "apron_lock_travel_mm": 120.0,
+      "apron_lock_timeout_s": 20.0
+    },
+    "charger": {
+      "align_tolerance_mm": 20.0,
+      "coal_target_t": 28.0,
+      "feed_rate_t_per_min": 4.0
+    },
+    "quench": {
+      "travel_distance_m": 42.0,
+      "travel_speed_m_s": 1.6,
+      "spray_duration_s": 90.0,
+      "water_flow_m3_h": 320.0
+    },
+    "collector": {
+      "pressure_target_pa": 90.0,
+      "pressure_band_pa": 18.0,
+      "regulate_rate_pa_per_s": 6.0
+    },
+    "door": {
+      "latch_travel_mm": 60.0,
+      "clean_duration_s": 45.0
+    },
+    "heating": {
+      "reversal_interval_s": 1800.0,
+      "temp_target_c": 1180.0,
+      "temp_band_c": 35.0,
+      "waste_close_lead_s": 4.0
+    },
+    "dust": {
+      "damper_open_deg": 70.0,
+      "damper_rate_deg_per_s": 14.0,
+      "linkage_lag_s": 1.5
+    }
+  }
+}
