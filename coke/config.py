@@ -1,7 +1,8 @@
 """平台配置。
 
 配置来自 JSON 文件（标准库解析），覆盖推焦行程基线、导焦栅对齐公差、集气
-管压力带、熄焦喷淋时长、换向间隔、炉温确认带、除尘挡板联动参数与存储目录。
+管压力带、装煤需求调度参数、熄焦喷淋时长、换向间隔、炉温确认带、除尘挡板
+联动参数与存储目录。
 任何缺失或越界取值都在装配阶段抛出 :class:`ConfigError`，不允许带着半份
 配置启动控制链。
 """
@@ -151,6 +152,33 @@ class CollectorLimits:
 
 
 @dataclass(frozen=True)
+class DispatchLimits:
+    """装煤需求调度约束。"""
+
+    aging_step_s: float
+    aging_max_bonus: int
+    prereg_headroom_ratio: float
+    prereg_max_steps: int
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "DispatchLimits":
+        limits = cls(
+            aging_step_s=_number(section, "aging_step_s", minimum=1.0),
+            aging_max_bonus=int(_number(section, "aging_max_bonus", minimum=0.0)),
+            prereg_headroom_ratio=_number(section, "prereg_headroom_ratio", minimum=0.0),
+            prereg_max_steps=int(_number(section, "prereg_max_steps", minimum=1.0)),
+        )
+        if limits.prereg_headroom_ratio > 1.0:
+            raise ConfigError("预调余量比例不得超过 1", component="config")
+        return limits
+
+    def prereg_target_pa(self, collector: CollectorLimits) -> float:
+        """预调目标压力：从目标值往目标带下沿留余量，给装煤煤气冲击留缓冲。"""
+
+        return collector.pressure_target_pa - collector.pressure_band_pa * self.prereg_headroom_ratio
+
+
+@dataclass(frozen=True)
 class DoorLimits:
     """炉门清扫闩锁约束。"""
 
@@ -223,6 +251,7 @@ class PlatformConfig:
     charger: ChargerLimits
     quench: QuenchLimits
     collector: CollectorLimits
+    dispatch: DispatchLimits
     door: DoorLimits
     heating: HeatingLimits
     dust: DustLimits
@@ -246,6 +275,7 @@ class PlatformConfig:
             charger=ChargerLimits.from_mapping(_section(limits, "charger")),
             quench=QuenchLimits.from_mapping(_section(limits, "quench")),
             collector=CollectorLimits.from_mapping(_section(limits, "collector")),
+            dispatch=DispatchLimits.from_mapping(_section(limits, "dispatch")),
             door=DoorLimits.from_mapping(_section(limits, "door")),
             heating=HeatingLimits.from_mapping(_section(limits, "heating")),
             dust=DustLimits.from_mapping(_section(limits, "dust")),
@@ -275,6 +305,7 @@ def default_config() -> PlatformConfig:
         charger=ChargerLimits(20.0, 28.0, 4.0),
         quench=QuenchLimits(42.0, 1.6, 90.0, 320.0),
         collector=CollectorLimits(90.0, 18.0, 6.0),
+        dispatch=DispatchLimits(30.0, 200, 0.6, 600),
         door=DoorLimits(60.0, 45.0),
         heating=HeatingLimits(1800.0, 1180.0, 35.0, 4.0),
         dust=DustLimits(70.0, 14.0, 1.5),
@@ -315,6 +346,12 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "pressure_target_pa": cfg.collector.pressure_target_pa,
                 "pressure_band_pa": cfg.collector.pressure_band_pa,
                 "regulate_rate_pa_per_s": cfg.collector.regulate_rate_pa_per_s,
+            },
+            "dispatch": {
+                "aging_step_s": cfg.dispatch.aging_step_s,
+                "aging_max_bonus": cfg.dispatch.aging_max_bonus,
+                "prereg_headroom_ratio": cfg.dispatch.prereg_headroom_ratio,
+                "prereg_max_steps": cfg.dispatch.prereg_max_steps,
             },
             "door": {
                 "latch_travel_mm": cfg.door.latch_travel_mm,

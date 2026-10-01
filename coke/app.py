@@ -1,9 +1,11 @@
 """平台装配与控制循环。
 
 ``Platform`` 把各组件按真实调用链接起来，并暴露四件事：操作编排（装煤、
-推焦、熄焦、换向、炉门清扫）、控制循环、并发仲裁探测和状态快照。控制循环
-每个周期做三件事：把集气管压力调向目标带、按推焦联动时序驱动除尘挡板、
-采集趋势；换向与推焦这类跨模块动作都由编排一次性走完并写审计。
+推焦、熄焦、换向、炉门清扫，以及带需求调度的装煤）、控制循环、并发仲裁
+探测和状态快照。控制循环每个周期做三件事：把集气管压力调向目标带、按推焦
+联动时序驱动除尘挡板、采集趋势；换向与推焦这类跨模块动作都由编排一次性走
+完并写审计。多炉同时装煤时由需求调度层先仲裁授权、预调集气管压力，再进入
+装煤编排。
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from .audit.record import AuditRecord
 from .charger.machine import ChargingCar
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
+from .dispatch.scheduler import DemandScheduler
 from .door.latch import DoorLatch
 from .door.machine import DoorCleaner
 from .dust.damper import DustDamper
@@ -46,6 +49,15 @@ from .telemetry import TrendBuffer
 
 DEFAULT_UNIT = "battery1"
 DEFAULT_OVEN = "oven01"
+
+_DISPATCH_MESSAGES = {
+    "submitted": "装煤需求已提交",
+    "prereg_applied": "预调到位，授权装煤",
+    "prereg_partial": "预调未到位（部分失败）",
+    "released": "装煤完成，释放调度授权",
+    "rolled_back": "预调已回退到调压前的值",
+    "rollback_partial": "回退未到位",
+}
 
 
 class Platform:
@@ -84,6 +96,13 @@ class Platform:
         self.quench_car = QuenchCar(self.config.quench)
         self.collector = CollectorMain(self.config.collector)
         self.flap = BridgeFlap(FlapLatch())
+        self.dispatcher = DemandScheduler(
+            self.clock,
+            self.collector,
+            self.config.dispatch,
+            JsonlJournal(store.root, "dispatch", segment_limit=512),
+            IdFactory("dm"),
+        )
         self.door = DoorCleaner(self.config.door, DoorLatch(self.config.door.latch_travel_mm))
         self.reversal = HeatingReversal(self.config.heating, self.clock)
         self.valves = ValveTrain()
@@ -108,6 +127,7 @@ class Platform:
             ("battery", "quench", "quench-car"),
             ("battery", "collector", "collector-main"),
             ("battery", "bridge_flap", "bridge-flap"),
+            ("battery", "dispatch", "demand-scheduler"),
             ("battery", "door", "door-cleaner"),
             ("battery", "reversal", "reversing-valve"),
             ("battery", "dust", "dust-damper"),
@@ -193,6 +213,40 @@ class Platform:
         )
         return summary
 
+    def _finish_operation(self, op_id: str, operation: str, report: dict) -> dict:
+        """写审计、累计计数并落盘，返回合并后的操作报告。"""
+
+        summary = self._record_operation(op_id, operation, report)
+        summary["op_id"] = op_id
+        self._operations += 1
+        self._persist()
+        return {**report, **summary}
+
+    def _audit_dispatch(self, op_id: str, record: dict) -> None:
+        """把一条调度流水同步到审计（幂等回放不重复落审计）。"""
+
+        event = str(record.get("event", ""))
+        if record.get("idempotent_replay") or not event:
+            return
+        detail = {
+            key: value
+            for key, value in record.items()
+            if key not in ("ts", "oven", "event", "idempotent_replay", "granted", "restored")
+            and not isinstance(value, (dict, list))
+        }
+        self.bus.publish(
+            Event.of(
+                "dispatch",
+                "dispatch",
+                event,
+                oven=str(record.get("oven", "")),
+                op_id=op_id,
+                severity="warning" if event in ("prereg_partial", "rollback_partial") else "notice",
+                message=_DISPATCH_MESSAGES.get(event, event),
+                **detail,
+            )
+        )
+
     def start(self) -> dict:
         """启动平台：启动除尘风机并核对拓扑。"""
 
@@ -226,11 +280,7 @@ class Platform:
             report = charge_oven(
                 self.charger, self.collector, self.flap, oven, hopper_target_mm, hopper_measured_mm, dt
             )
-            summary = self._record_operation(op_id, "charge", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            return self._finish_operation(op_id, "charge", report)
 
     def push(
         self,
@@ -262,11 +312,7 @@ class Platform:
             stroke_check = self.stroke.check(self.pusher.ram_mm)
             report["speed_arbitration"] = arbitration.as_dict()
             report["stroke_check"] = stroke_check
-            summary = self._record_operation(op_id, "push", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            return self._finish_operation(op_id, "push", report)
 
     def quench(self, oven: str = DEFAULT_OVEN, dt: float = 1.0) -> dict:
         """熄焦编排：接焦 → 走行 → 喷淋。"""
@@ -275,11 +321,7 @@ class Platform:
             op_id = self.ids.next()
             report = quench_oven(self.quench_car, oven, dt)
             report["travel_eta_s"] = self.quench_car.plan.eta_s()
-            summary = self._record_operation(op_id, "quench", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            return self._finish_operation(op_id, "quench", report)
 
     def reverse(self, oven: str = DEFAULT_OVEN, temperature_c: float | None = None) -> dict:
         """换向编排：废气阀 → 煤气阀 → 炉温确认。"""
@@ -289,11 +331,7 @@ class Platform:
             target_temp = self.config.heating.temp_target_c if temperature_c is None else temperature_c
             report = reverse_heating(self.reversal, self.valves, self.temperature, oven, target_temp)
             report["offset_c"] = self.temperature.offset_c()
-            summary = self._record_operation(op_id, "reverse", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            return self._finish_operation(op_id, "reverse", report)
 
     def clean(self, oven: str = DEFAULT_OVEN, dt: float = 1.0) -> dict:
         """炉门清扫编排：松开闩锁 → 开炉门 → 清扫 → 复位闩锁。"""
@@ -301,11 +339,115 @@ class Platform:
         with self._lock:
             op_id = self.ids.next()
             report = clean_door(self.door, oven, dt)
-            summary = self._record_operation(op_id, "clean", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            return self._finish_operation(op_id, "clean", report)
+
+    def submit_charge_demand(self, oven: str = DEFAULT_OVEN, coking_stage: str = "mid") -> dict:
+        """提交一路装煤需求（同炉重复提交幂等，返回既有需求）。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            record = self.dispatcher.submit(oven, coking_stage)
+            self._audit_dispatch(op_id, record)
+            return record
+
+    def dispatch_next(self, dt: float = 1.0) -> dict:
+        """仲裁一路排队需求并执行预调（并发重复触发幂等，不重复调压）。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            record = self.dispatcher.dispatch(dt)
+            self._audit_dispatch(op_id, record)
+            return record
+
+    def complete_charge_demand(self, demand_id: str) -> dict:
+        """装煤完成，释放调度授权（重复释放幂等）。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            record = self.dispatcher.complete(demand_id)
+            self._audit_dispatch(op_id, record)
+            return record
+
+    def rollback_charge_demand(self, demand_id: str, dt: float = 1.0) -> dict:
+        """把预调回退到调压前的压力（重复回退幂等）。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            record = self.dispatcher.rollback(demand_id, dt)
+            self._audit_dispatch(op_id, record)
+            return record
+
+    def charge_scheduled(
+        self,
+        oven: str = DEFAULT_OVEN,
+        coking_stage: str = "mid",
+        hopper_target_mm: float = 0.0,
+        hopper_measured_mm: float = 0.0,
+        dt: float = 1.0,
+    ) -> dict:
+        """调度装煤编排：提交需求 → 仲裁预调 → 装煤 → 释放；失败回退预调。
+
+        与 :meth:`charge` 的差别在于压力先经需求调度授权并预调到位；预调属于
+        可部分失败的操作，预调未到位或装煤编排失败都会把压力回退到调压前的值。
+        """
+
+        with self._lock:
+            op_id = self.ids.next()
+            submit = self.dispatcher.submit(oven, coking_stage)
+            self._audit_dispatch(op_id, submit)
+            decision = self.dispatcher.dispatch(dt)
+            self._audit_dispatch(op_id, decision)
+            dispatch_info = {"submit": submit, "decision": decision}
+
+            if not decision.get("granted", False):
+                report = {
+                    "oven": oven,
+                    "ok": False,
+                    "steps": [],
+                    "violations": ["dispatch_queue_empty"],
+                    "dispatch": dispatch_info,
+                }
+                return self._finish_operation(op_id, "charge_scheduled", report)
+            if decision["demand_id"] != submit["demand_id"]:
+                report = {
+                    "oven": oven,
+                    "ok": False,
+                    "steps": [],
+                    "violations": ["dispatch_not_granted"],
+                    "dispatch": dispatch_info,
+                }
+                return self._finish_operation(op_id, "charge_scheduled", report)
+            if decision["state"] == "partial":
+                rollback = self.dispatcher.rollback(decision["demand_id"], dt)
+                self._audit_dispatch(op_id, rollback)
+                report = {
+                    "oven": oven,
+                    "ok": False,
+                    "steps": [],
+                    "violations": ["prereg_partial"],
+                    "dispatch": dispatch_info,
+                    "rollback": rollback,
+                }
+                return self._finish_operation(op_id, "charge_scheduled", report)
+
+            report = charge_oven(
+                self.charger, self.collector, self.flap, oven, hopper_target_mm, hopper_measured_mm, dt
+            )
+            report["dispatch"] = dispatch_info
+            if report["ok"]:
+                release = self.dispatcher.complete(decision["demand_id"])
+                self._audit_dispatch(op_id, release)
+                report["release"] = release
+            else:
+                rollback = self.dispatcher.rollback(decision["demand_id"], dt)
+                self._audit_dispatch(op_id, rollback)
+                report["rollback"] = rollback
+            return self._finish_operation(op_id, "charge_scheduled", report)
+
+    def dispatch_snapshot(self) -> dict:
+        """调度快照：仲裁模式、等待队列、当前授权与最近调度流水。"""
+
+        return self.dispatcher.snapshot().as_dict()
 
     def cycle(self, dt: float = 1.0) -> dict:
         """推进一个控制周期，返回本周期摘要。"""
@@ -481,6 +623,7 @@ class Platform:
                 "latch_cycles": self.flap.latch.cycles(),
                 "latch_resets": self.flap.latch.resets(),
             },
+            "dispatch": self.dispatcher.summary(),
             "door": {**self.door.snapshot().as_dict(), "latch_cycles": self.door.latch.cycles()},
             "heating": self.heating_snapshot().as_dict(),
             "dust": self.dust_snapshot().as_dict(),

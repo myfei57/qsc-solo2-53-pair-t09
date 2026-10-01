@@ -36,6 +36,17 @@ class CollectorMain:
         )
         return self._pressure_pa
 
+    def regulate_toward(self, target_pa: float, dt: float) -> float:
+        """向指定压力调节一个步长（需求调度的预调与回退用），返回新压力。"""
+
+        self._pressure_pa = regulate_pressure(
+            self._pressure_pa,
+            float(target_pa),
+            self._limits.regulate_rate_pa_per_s,
+            dt,
+        )
+        return self._pressure_pa
+
     def disturb(self, delta_pa: float) -> float:
         """施加一次外部扰动，返回扰动后的压力。"""
 

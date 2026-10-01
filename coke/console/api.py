@@ -46,8 +46,14 @@ class Api:
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/dispatch", lambda params, body: self._platform.dispatch_snapshot())
         add("POST", "/api/step", self._step)
         add("POST", "/api/charge", self._charge)
+        add("POST", "/api/charge-scheduled", self._charge_scheduled)
+        add("POST", "/api/dispatch/submit", self._dispatch_submit)
+        add("POST", "/api/dispatch/run", self._dispatch_run)
+        add("POST", "/api/dispatch/complete", self._dispatch_complete)
+        add("POST", "/api/dispatch/rollback", self._dispatch_rollback)
         add("POST", "/api/push", self._push)
         add("POST", "/api/quench", self._quench)
         add("POST", "/api/reverse", self._reverse)
@@ -147,6 +153,31 @@ class Api:
             hopper_target_mm=_as_float(body, "hopper_target_mm", 0.0),
             hopper_measured_mm=_as_float(body, "hopper_measured_mm", 0.0),
             dt=_as_float(body, "dt", 1.0),
+        )
+
+    def _charge_scheduled(self, params: dict, body: dict) -> dict:
+        return self._platform.charge_scheduled(
+            oven=str(body.get("oven", "oven01")),
+            coking_stage=str(body.get("coking_stage", "mid")),
+            hopper_target_mm=_as_float(body, "hopper_target_mm", 0.0),
+            hopper_measured_mm=_as_float(body, "hopper_measured_mm", 0.0),
+            dt=_as_float(body, "dt", 1.0),
+        )
+
+    def _dispatch_submit(self, params: dict, body: dict) -> dict:
+        return self._platform.submit_charge_demand(
+            oven=str(body.get("oven", "oven01")), coking_stage=str(body.get("coking_stage", "mid"))
+        )
+
+    def _dispatch_run(self, params: dict, body: dict) -> dict:
+        return self._platform.dispatch_next(dt=_as_float(body, "dt", 1.0))
+
+    def _dispatch_complete(self, params: dict, body: dict) -> dict:
+        return self._platform.complete_charge_demand(str(body.get("demand_id", "")))
+
+    def _dispatch_rollback(self, params: dict, body: dict) -> dict:
+        return self._platform.rollback_charge_demand(
+            str(body.get("demand_id", "")), dt=_as_float(body, "dt", 1.0)
         )
 
     def _push(self, params: dict, body: dict) -> dict:

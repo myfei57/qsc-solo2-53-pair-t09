@@ -33,6 +33,12 @@
       "pressure_band_pa": 18.0,
       "regulate_rate_pa_per_s": 6.0
     },
+    "dispatch": {
+      "aging_step_s": 30.0,
+      "aging_max_bonus": 200,
+      "prereg_headroom_ratio": 0.6,
+      "prereg_max_steps": 600
+    },
     "door": {
       "latch_travel_mm": 60.0,
       "clean_duration_s": 45.0

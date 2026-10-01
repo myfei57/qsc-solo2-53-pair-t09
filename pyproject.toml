@@ -21,6 +21,7 @@ packages = [
     "coke.charger",
     "coke.quench",
     "coke.gas",
+    "coke.dispatch",
     "coke.door",
     "coke.heating",
     "coke.dust",

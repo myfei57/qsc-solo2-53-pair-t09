@@ -3,8 +3,9 @@
 五个子命令覆盖日常使用：
 
 ``serve``   启动控制台 HTTP 服务，可选地在启动后探测接口；
-``demo``    在本地跑一遍完整流程（启动 → 装煤 → 换向 → 推焦 → 熄焦 → 清扫 →
-            控制周期 → 并发探测 → 行程标定），用于交付前的真实运行检查；
+``demo``    在本地跑一遍完整流程（启动 → 装煤 → 换向 → 推焦 → 熄焦 →
+            控制周期 → 清扫 → 调度装煤 → 并发探测 → 行程标定），用于交付前的
+            真实运行检查；
 ``status``  打印当前状态快照；
 ``config``  打印生效配置；
 ``reset``   清掉落盘的平台计数。
@@ -77,6 +78,9 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     quench = platform.quench(oven="oven01")
     cycles = [platform.cycle(dt=1.0) for _ in range(8)]
     cleaning = platform.clean(oven="oven01")
+    scheduled = platform.charge_scheduled(
+        oven="oven02", coking_stage="early", hopper_target_mm=0.0, hopper_measured_mm=0.0
+    )
     concurrency = platform.concurrency_probe(rounds=args.rounds)
     calibration = platform.calibrate_stroke(value_mm=3212.0)
     shutdown = platform.stop()
@@ -97,6 +101,11 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "cycles_run": len(cycles),
         "last_cycle": cycles[-1],
         "cleaning": {"ok": cleaning["ok"], "steps": [step["action"] for step in cleaning["steps"]]},
+        "charge_scheduled": {
+            "ok": scheduled["ok"],
+            "mode": scheduled["dispatch"]["decision"].get("mode"),
+            "steps": [step["action"] for step in scheduled["steps"]],
+        },
         "concurrency": concurrency,
         "calibration": calibration,
         "shutdown": shutdown,
@@ -105,7 +114,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     }
     _dump(report)
     failures = [name for name, item in probe.items() if not item["ok"]]
-    for operation in (charge, reversal, push, quench, cleaning):
+    for operation in (charge, reversal, push, quench, cleaning, scheduled):
         if not operation["ok"]:
             failures.extend(operation["violations"])
     if failures:
