@@ -42,6 +42,16 @@ class CollectorMain:
         self._pressure_pa += float(delta_pa)
         return self._pressure_pa
 
+    def restore(self, pressure_pa: float) -> float:
+        """把压力直接恢复到给定值，返回恢复后的压力。
+
+        只用于需求调度预调失败后的回退：压力放回调度记录里调压前的值，
+        控制循环随后从原状态重新调节；正常调节走 ``regulate``。
+        """
+
+        self._pressure_pa = float(pressure_pa)
+        return self._pressure_pa
+
     def settled(self) -> bool:
         """压力是否已进入目标带。"""
 

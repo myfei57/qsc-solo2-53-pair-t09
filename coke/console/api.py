@@ -46,8 +46,12 @@ class Api:
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/schedule", lambda params, body: self._platform.gas_schedule_snapshot())
         add("POST", "/api/step", self._step)
         add("POST", "/api/charge", self._charge)
+        add("POST", "/api/schedule/pre_adjust", self._schedule_pre_adjust)
+        add("POST", "/api/schedule/rollback", self._schedule_rollback)
+        add("POST", "/api/schedule/release", self._schedule_release)
         add("POST", "/api/push", self._push)
         add("POST", "/api/quench", self._quench)
         add("POST", "/api/reverse", self._reverse)
@@ -142,12 +146,39 @@ class Api:
         return self._platform.cycle(dt=_as_float(body, "dt", 1.0))
 
     def _charge(self, params: dict, body: dict) -> dict:
+        key = body.get("schedule_key")
         return self._platform.charge(
             oven=str(body.get("oven", "oven01")),
             hopper_target_mm=_as_float(body, "hopper_target_mm", 0.0),
             hopper_measured_mm=_as_float(body, "hopper_measured_mm", 0.0),
             dt=_as_float(body, "dt", 1.0),
+            expected_disturbance_pa=_as_float(body, "expected_disturbance_pa", 0.0),
+            backflow_risk=bool(body.get("backflow_risk", False)),
+            schedule_key=None if key is None else str(key),
         )
+
+    def _schedule_pre_adjust(self, params: dict, body: dict) -> dict:
+        key = body.get("key")
+        return self._platform.schedule_pre_adjust(
+            oven=str(body.get("oven", "oven01")),
+            key=None if key is None else str(key),
+            expected_disturbance_pa=_as_float(body, "expected_disturbance_pa", 0.0),
+            backflow_risk=bool(body.get("backflow_risk", False)),
+            dt=_as_float(body, "dt", 1.0),
+        )
+
+    def _schedule_rollback(self, params: dict, body: dict) -> dict:
+        return self._platform.rollback_pre_adjust(self._require_key(params, body))
+
+    def _schedule_release(self, params: dict, body: dict) -> dict:
+        return self._platform.release_pre_adjust(self._require_key(params, body))
+
+    @staticmethod
+    def _require_key(params: dict, body: dict) -> str:
+        key = body.get("key") or params.get("key")
+        if not key:
+            raise CokeError("缺少必填字段 'key'", component="console")
+        return str(key)
 
     def _push(self, params: dict, body: dict) -> dict:
         return self._platform.push(

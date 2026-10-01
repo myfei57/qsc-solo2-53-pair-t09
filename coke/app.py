@@ -25,6 +25,7 @@ from .dust.system import DustSystem
 from .errors import CokeError
 from .eventbus import Event, EventBus
 from .gas.collector import CollectorMain
+from .gas.demand import DemandScheduler, OvenCondition
 from .gas.flap import BridgeFlap
 from .gas.latch import FlapLatch
 from .guide.machine import GuideCar
@@ -84,6 +85,7 @@ class Platform:
         self.quench_car = QuenchCar(self.config.quench)
         self.collector = CollectorMain(self.config.collector)
         self.flap = BridgeFlap(FlapLatch())
+        self.gas_schedule = DemandScheduler(self.collector, self.clock, self.bus)
         self.door = DoorCleaner(self.config.door, DoorLatch(self.config.door.latch_travel_mm))
         self.reversal = HeatingReversal(self.config.heating, self.clock)
         self.valves = ValveTrain()
@@ -218,19 +220,120 @@ class Platform:
         hopper_target_mm: float = 0.0,
         hopper_measured_mm: float = 0.0,
         dt: float = 1.0,
+        expected_disturbance_pa: float = 0.0,
+        backflow_risk: bool = False,
+        schedule_key: str | None = None,
     ) -> dict:
-        """装煤编排：煤斗对位 → 调压 → 开翻板 → 给煤。"""
+        """装煤编排：需求调度（排队 → 预调）→ 煤斗对位 → 调压 → 开翻板 → 给煤。
+
+        ``schedule_key`` 是预调的幂等键：没轮到时本次装煤只排队不调压，
+        调用方持同一个键重试即可接着排队，不会重复登记、重复调压。
+        """
 
         with self._lock:
             op_id = self.ids.next()
+            key = schedule_key or f"charge-{op_id}"
+            condition = OvenCondition(oven, expected_disturbance_pa, backflow_risk)
+            created = self.gas_schedule.ticket_for(key) is None
+            self.gas_schedule.request(key, condition)
+            ticket = self.gas_schedule.pre_adjust(key, dt=dt)
+            schedule = {
+                "key": key,
+                "created": created,
+                "status": ticket.status,
+                "priority": ticket.priority,
+                "position": self.gas_schedule.position_of(key),
+            }
+            if ticket.status == "queued":
+                # 没轮到：本次装煤只排队不调压，等调度放行后用同一键重试。
+                return {
+                    "oven": oven,
+                    "ok": False,
+                    "queued": True,
+                    "schedule": schedule,
+                    "steps": [],
+                    "violations": [],
+                }
+            if ticket.status != "applied":
+                violation = (
+                    "pre_adjust_failed" if ticket.status == "rolled_back" else "schedule_key_consumed"
+                )
+                report = {"oven": oven, "ok": False, "steps": [], "violations": [violation]}
+                report["schedule"] = schedule
+                summary = self._record_operation(op_id, "charge", report)
+                summary["op_id"] = op_id
+                self._operations += 1
+                self._persist()
+                return {**report, **summary}
             report = charge_oven(
                 self.charger, self.collector, self.flap, oven, hopper_target_mm, hopper_measured_mm, dt
             )
+            if report["ok"]:
+                self.gas_schedule.release(key)
+            else:
+                # 部分失败：预调已生效但装煤没走完，压力回退到调压前的值。
+                self.gas_schedule.rollback(key, reason="charge_incomplete")
+            final = self.gas_schedule.ticket_for(key)
+            report["schedule"] = {**schedule, "status": final.status if final else ticket.status}
             summary = self._record_operation(op_id, "charge", report)
             summary["op_id"] = op_id
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    def schedule_pre_adjust(
+        self,
+        oven: str = DEFAULT_OVEN,
+        key: str | None = None,
+        expected_disturbance_pa: float = 0.0,
+        backflow_risk: bool = False,
+        dt: float = 1.0,
+    ) -> dict:
+        """登记一路装煤需求，轮到它时把集气管压力预调进目标带。
+
+        同一个 ``key`` 并发重复触发只执行一次（幂等），返回既有票据。
+        """
+
+        with self._lock:
+            key = key or f"sched-{self.ids.next()}"
+            condition = OvenCondition(oven, expected_disturbance_pa, backflow_risk)
+            created = self.gas_schedule.ticket_for(key) is None
+            self.gas_schedule.request(key, condition)
+            ticket = self.gas_schedule.pre_adjust(key, dt=dt)
+            return {
+                "key": key,
+                "created": created,
+                "oven": oven,
+                "condition": condition.as_dict(),
+                "ticket": ticket.as_dict(),
+                "position": self.gas_schedule.position_of(key),
+                "pressure_pa": round(self.collector.pressure_pa, 2),
+                "settled": self.collector.settled(),
+            }
+
+    def rollback_pre_adjust(self, key: str, reason: str = "manual_rollback") -> dict:
+        """把一次已生效的预调回退到调压前的压力（部分失败用）。"""
+
+        with self._lock:
+            ticket = self.gas_schedule.rollback(key, reason=reason)
+            return {
+                "key": key,
+                "ticket": ticket.as_dict(),
+                "pressure_pa": round(self.collector.pressure_pa, 2),
+                "settled": self.collector.settled(),
+            }
+
+    def release_pre_adjust(self, key: str) -> dict:
+        """装煤完成后释放调度位，让排队的下一路预调。"""
+
+        with self._lock:
+            ticket = self.gas_schedule.release(key)
+            return {"key": key, "ticket": ticket.as_dict()}
+
+    def gas_schedule_snapshot(self) -> dict:
+        """返回装煤需求调度快照，供控制台展示。"""
+
+        return self.gas_schedule.snapshot()
 
     def push(
         self,
@@ -481,6 +584,7 @@ class Platform:
                 "latch_cycles": self.flap.latch.cycles(),
                 "latch_resets": self.flap.latch.resets(),
             },
+            "gas_schedule": self.gas_schedule.snapshot(),
             "door": {**self.door.snapshot().as_dict(), "latch_cycles": self.door.latch.cycles()},
             "heating": self.heating_snapshot().as_dict(),
             "dust": self.dust_snapshot().as_dict(),
